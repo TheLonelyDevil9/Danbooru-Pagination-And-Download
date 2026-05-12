@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         Danbooru Pagination And Download
 // @namespace    https://danbooru.donmai.us/
-// @version      2.5.0
+// @version      2.5.1
+// @updateURL    https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
+// @downloadURL  https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @description  Load 10 Danbooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images.
 // @match        https://danbooru.donmai.us/*
 // @run-at       document-end
