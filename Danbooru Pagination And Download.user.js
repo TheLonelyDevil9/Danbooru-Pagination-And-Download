@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Danbooru Pagination And Download
 // @namespace    https://danbooru.donmai.us/
-// @version      2.5.1
+// @version      2.5.2
 // @updateURL    https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @downloadURL  https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @description  Load 10 Danbooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images.
@@ -33,6 +33,8 @@
   let lastMiddleOpenAt = 0;
   const originalUrlByPostId = new Map();
   const filenameByPostId = new Map();
+  const nativeDownloadNameByPostId = new Map();
+  const nativeDownloadNamePromiseByPostId = new Map();
 
   function addStyles() {
     if (document.getElementById(STYLE_ID)) {
@@ -240,47 +242,65 @@
     return filename?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || "";
   }
 
-  function isMd5Filename(filename) {
-    return /^[a-f0-9]{32}\.[a-z0-9]+$/i.test(filename || "");
-  }
-
-  function cleanFilenamePart(value) {
-    return (value || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[\\/:*?"<>|]+/g, "_")
-      .replace(/&/g, "and")
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/_{2,}/g, "_");
-  }
-
   function cleanDownloadName(filename) {
     return (filename || "")
       .trim()
       .replace(/[\\/:*?"<>|\x00-\x1f\x7f]+/g, "_");
   }
 
-  function slugFromTags(tags) {
-    const meaningfulTags = (tags || "")
-      .split(/\s+/)
-      .filter((tag) => tag && !tag.includes(":"))
-      .slice(0, 8);
+  function nativeDownloadNameFromDocument(root = document) {
+    const downloadLink = root.querySelector("#post-option-download a[download]");
+    return cleanDownloadName(downloadLink?.getAttribute("download") || "");
+  }
 
-    return meaningfulTags
-      .join("_")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/_{2,}/g, "_");
+  async function fetchNativeDownloadName(postId) {
+    if (!postId) {
+      return "";
+    }
+
+    if (nativeDownloadNameByPostId.has(postId)) {
+      return nativeDownloadNameByPostId.get(postId);
+    }
+
+    if (!nativeDownloadNamePromiseByPostId.has(postId)) {
+      const promise = fetch(`/posts/${postId}`, {
+        credentials: "same-origin",
+        headers: { Accept: "text/html" },
+      })
+        .then((response) => response.ok ? response.text() : "")
+        .then((html) => {
+          if (!html) {
+            return "";
+          }
+
+          const postDocument = new DOMParser().parseFromString(html, "text/html");
+          const downloadName = nativeDownloadNameFromDocument(postDocument);
+
+          if (downloadName) {
+            nativeDownloadNameByPostId.set(postId, downloadName);
+          }
+
+          return downloadName;
+        })
+        .catch(() => "")
+        .finally(() => nativeDownloadNamePromiseByPostId.delete(postId));
+
+      nativeDownloadNamePromiseByPostId.set(postId, promise);
+    }
+
+    return nativeDownloadNamePromiseByPostId.get(postId);
   }
 
   function tagList(value) {
     return typeof value === "string" ? value.split(/\s+/).filter(Boolean) : [];
   }
 
-  function unqualifiedTagName(tag) {
-    return tag.replace(/_\(.*\)$/, "");
+  function humanizedUnqualifiedTagName(tag) {
+    return tag.replace(/_\(.*\)$/, "").replace(/_/g, " ");
+  }
+
+  function uniqueItems(items) {
+    return Array.from(new Set(items));
   }
 
   function humanizedList(items) {
@@ -295,9 +315,9 @@
     return `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
   }
 
-  function essentialTagSlug(post) {
-    const characters = tagList(post?.tag_string_character).map(unqualifiedTagName);
-    const copyrights = tagList(post?.tag_string_copyright).map(unqualifiedTagName);
+  function humanizedEssentialTagString(post) {
+    const characters = uniqueItems(tagList(post?.tag_string_character).map(humanizedUnqualifiedTagName));
+    const copyrights = uniqueItems(tagList(post?.tag_string_copyright).map(humanizedUnqualifiedTagName));
     const artists = tagList(post?.tag_string_artist);
     const parts = [];
 
@@ -324,55 +344,16 @@
       parts.push(`drawn by ${humanizedList(artists)}`);
     }
 
-    return parts.join(" ")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/_{2,}/g, "_");
+    return parts.join(" ").replace(/\s+/g, " ").trim();
   }
 
-  function taggedFilenameFromParts(slug, md5, ext) {
-    const cleanSlug = slug.replace(/^_+|_+$/g, "");
-    return cleanSlug ? `__${cleanSlug}__${md5}.${ext}` : `${md5}.${ext}`;
-  }
-
-  function taggedUrlFromPost(post, fallbackUrl) {
-    const md5 = post?.md5 || filenameFromUrl(fallbackUrl)?.match(/[a-f0-9]{32}/i)?.[0] || "";
-    const ext = post?.file_ext || extensionFromFilename(filenameFromUrl(fallbackUrl));
-    const slug = essentialTagSlug(post) || slugFromTags(tagStringFromPost(post));
-
-    if (!slug || !md5 || !ext) {
-      return fallbackUrl;
-    }
-
-    try {
-      const parsed = new URL(fallbackUrl, location.href);
-      const parts = parsed.pathname.split("/");
-      const filename = parts.pop() || "";
-
-      if (/^[a-f0-9]{32}\.[a-z0-9]+$/i.test(filename)) {
-        parts.push(taggedFilenameFromParts(slug, md5, ext));
-        parsed.pathname = parts.join("/");
-        return parsed.href;
-      }
-    } catch (_error) {
-      return fallbackUrl;
-    }
-
-    return fallbackUrl;
-  }
-
-  function taggedDownloadName(post, originalUrl) {
+  function defaultDanbooruDownloadName(post, originalUrl) {
     const md5 = post?.md5 || filenameFromUrl(originalUrl)?.match(/[a-f0-9]{32}/i)?.[0] || "";
     const ext = post?.file_ext || extensionFromFilename(filenameFromUrl(originalUrl)) || "file";
-    const slug =
-      post?.media_asset?.metadata?.metadata?.slug ||
-      post?.media_asset?.metadata?.slug ||
-      essentialTagSlug(post) ||
-      slugFromTags(tagStringFromPost(post));
+    const humanizedTags = humanizedEssentialTagString(post) || (post?.id ? `#${post.id}` : "");
 
-    if (slug && md5) {
-      return taggedFilenameFromParts(cleanFilenamePart(slug), md5, ext);
+    if (humanizedTags && md5) {
+      return cleanDownloadName(`${humanizedTags} - ${md5}.${ext}`);
     }
 
     return cleanDownloadName(filenameFromUrl(originalUrl)) || (post?.id ? `danbooru-${post.id}.${ext}` : undefined);
@@ -384,10 +365,9 @@
     }
 
     const postId = String(post.id);
-    const rawOriginalUrl = stripDownloadParam(makeAbsoluteUrl(post.file_url));
-    const originalUrl = taggedUrlFromPost(post, rawOriginalUrl);
+    const originalUrl = stripDownloadParam(makeAbsoluteUrl(post.file_url));
     originalUrlByPostId.set(postId, originalUrl);
-    filenameByPostId.set(postId, taggedDownloadName(post, originalUrl) || `danbooru-${postId}.${post.file_ext || "file"}`);
+    filenameByPostId.set(postId, defaultDanbooruDownloadName(post, originalUrl) || `danbooru-${postId}.${post.file_ext || "file"}`);
   }
 
   function tagStringFromPost(post) {
@@ -777,8 +757,14 @@
     return postId ? originalUrlByPostId.get(postId) || "" : "";
   }
 
-  function getListingDownloadName(preview, originalUrl) {
+  async function getListingDownloadName(preview, originalUrl) {
     const postId = postIdFromPreview(preview);
+    const nativeName = await fetchNativeDownloadName(postId);
+
+    if (nativeName) {
+      return nativeName;
+    }
+
     return cleanDownloadName((postId && filenameByPostId.get(postId)) || filenameFromUrl(originalUrl)) || `danbooru-${postId || "original"}`;
   }
 
@@ -826,14 +812,14 @@
       button.title = "Download original; middle-click to open original";
       button.setAttribute("aria-label", "Download original; middle-click to open original");
 
-      button.addEventListener("click", (event) => {
+      button.addEventListener("click", async (event) => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
           return;
         }
 
         event.preventDefault();
         event.stopPropagation();
-        downloadOriginal(originalUrl, getListingDownloadName(preview, originalUrl));
+        downloadOriginal(originalUrl, await getListingDownloadName(preview, originalUrl));
       });
 
       button.addEventListener("auxclick", (event) => {
@@ -860,14 +846,14 @@
         openOriginalInNewTab(originalUrl, event);
       });
 
-      button.addEventListener("keydown", (event) => {
+      button.addEventListener("keydown", async (event) => {
         if (event.key !== "Enter" && event.key !== " ") {
           return;
         }
 
         event.preventDefault();
         event.stopPropagation();
-        downloadOriginal(originalUrl, getListingDownloadName(preview, originalUrl));
+        downloadOriginal(originalUrl, await getListingDownloadName(preview, originalUrl));
       });
 
       actions.append(button);
@@ -899,12 +885,9 @@
   }
 
   function getPostPageDownloadName(originalUrl) {
-    const downloadLink = document.querySelector("#post-option-download a[download]");
     const urlName = cleanDownloadName(filenameFromUrl(originalUrl));
-    const downloadName = cleanDownloadName(downloadLink?.getAttribute("download") || "");
-    return urlName && !isMd5Filename(urlName)
-      ? urlName
-      : downloadName || urlName || "danbooru-original";
+    const downloadName = nativeDownloadNameFromDocument();
+    return downloadName || urlName || "danbooru-original";
   }
 
   async function fetchPostPageOriginalUrlFromApi() {
