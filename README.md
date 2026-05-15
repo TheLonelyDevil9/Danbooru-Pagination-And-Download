@@ -6,5 +6,5 @@ Loads batches of Danbooru post-list pages and adds one-click original download b
 
 ## Install
 
-Use a userscript manager such as Tampermonkey or Violentmonkey, then install the `.user.js` file from this repository.
+https://raw.githubusercontent.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/main/Danbooru%20Pagination%20And%20Download.user.js
 
