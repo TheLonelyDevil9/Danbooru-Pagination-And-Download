@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         Danbooru Pagination And Download
 // @namespace    https://danbooru.donmai.us/
-// @version      2.5.2
+// @version      2.6.0
 // @updateURL    https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @downloadURL  https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
-// @description  Load 10 Danbooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images.
+// @description  Load 10 Danbooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images. JPEG originals are saved as lossless PNG.
 // @match        https://danbooru.donmai.us/*
 // @run-at       document-end
 // @noframes
 // @grant        GM_download
 // @grant        GM.download
+// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @connect      danbooru.donmai.us
 // @connect      cdn.donmai.us
 // @connect      *.donmai.us
@@ -19,6 +21,7 @@
   "use strict";
 
   const PAGE_BATCH_SIZE = 10;
+  const CONVERT_JPEG_TO_PNG = true;
   const PAGE_BUTTON_CLASS = "dcx-post-download";
   const PAGE_ACTIONS_CLASS = "dcx-post-actions";
   const SCORE_ACTIONS_CLASS = "dcx-score-actions";
@@ -926,10 +929,7 @@
     link.remove();
   }
 
-  function downloadOriginal(originalUrl, filename) {
-    const downloadUrl = addDownloadParam(originalUrl);
-    const name = cleanDownloadName(filename || filenameFromUrl(originalUrl)) || "danbooru-original";
-
+  function downloadNative(downloadUrl, name) {
     if (typeof GM_download === "function") {
       GM_download({
         url: downloadUrl,
@@ -947,6 +947,82 @@
     }
 
     fallbackDownload(downloadUrl, name);
+  }
+
+  function isJpegUrl(url) {
+    return /\.jpe?g(?:$|[?#])/i.test(url);
+  }
+
+  function pngDownloadName(filename) {
+    const name = filename || "danbooru-original";
+    return /\.jpe?g$/i.test(name) ? name.replace(/\.jpe?g$/i, ".png") : `${name}.png`;
+  }
+
+  function fetchImageBlob(url) {
+    const gmRequest = typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : globalThis.GM?.xmlHttpRequest;
+
+    if (!gmRequest) {
+      return fetch(url, { mode: "cors", credentials: "omit" })
+        .then((response) => response.ok ? response.blob() : Promise.reject(new Error(`HTTP ${response.status}`)));
+    }
+
+    return new Promise((resolve, reject) => {
+      gmRequest({
+        method: "GET",
+        url,
+        responseType: "blob",
+        onload: (response) => {
+          if (response.status >= 200 && response.status < 300 && response.response) {
+            resolve(response.response);
+          } else {
+            reject(new Error(`HTTP ${response.status}`));
+          }
+        },
+        onerror: () => reject(new Error("Network error")),
+        ontimeout: () => reject(new Error("Request timed out")),
+      });
+    });
+  }
+
+  async function convertBlobToPng(blob) {
+    const bitmap = await createImageBitmap(blob);
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+
+      return await new Promise((resolve, reject) => {
+        canvas.toBlob((pngBlob) => pngBlob ? resolve(pngBlob) : reject(new Error("PNG encoding failed")), "image/png");
+      });
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  function downloadBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    fallbackDownload(objectUrl, filename);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+  }
+
+  async function downloadJpegAsPng(originalUrl, name) {
+    const jpegBlob = await fetchImageBlob(originalUrl);
+    const pngBlob = await convertBlobToPng(jpegBlob);
+    downloadBlob(pngBlob, pngDownloadName(name));
+  }
+
+  function downloadOriginal(originalUrl, filename) {
+    const downloadUrl = addDownloadParam(originalUrl);
+    const name = cleanDownloadName(filename || filenameFromUrl(originalUrl)) || "danbooru-original";
+
+    if (CONVERT_JPEG_TO_PNG && isJpegUrl(originalUrl)) {
+      downloadJpegAsPng(originalUrl, name).catch(() => downloadNative(downloadUrl, name));
+      return;
+    }
+
+    downloadNative(downloadUrl, name);
   }
 
   function openOriginalInNewTab(originalUrl, event) {
