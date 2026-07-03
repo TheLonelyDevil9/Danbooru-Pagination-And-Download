@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Danbooru Pagination And Download
 // @namespace    https://danbooru.donmai.us/
-// @version      2.6.0
+// @version      2.7.0
 // @updateURL    https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @downloadURL  https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
-// @description  Load 10 Danbooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images. JPEG originals are saved as lossless PNG.
+// @description  Load 10 Danbooru/AIBooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images. JPEG originals are saved as lossless PNG.
 // @match        https://danbooru.donmai.us/*
+// @match        https://aibooru.online/*
 // @run-at       document-end
 // @noframes
 // @grant        GM_download
@@ -15,6 +16,9 @@
 // @connect      danbooru.donmai.us
 // @connect      cdn.donmai.us
 // @connect      *.donmai.us
+// @connect      aibooru.online
+// @connect      cdn.aibooru.download
+// @connect      *.aibooru.download
 // ==/UserScript==
 
 (function () {
@@ -22,6 +26,7 @@
 
   const PAGE_BATCH_SIZE = 10;
   const CONVERT_JPEG_TO_PNG = true;
+  const SITE_NAME = location.hostname.replace(/^www\./, "").split(".")[0] || "booru";
   const PAGE_BUTTON_CLASS = "dcx-post-download";
   const PAGE_ACTIONS_CLASS = "dcx-post-actions";
   const SCORE_ACTIONS_CLASS = "dcx-score-actions";
@@ -359,7 +364,7 @@
       return cleanDownloadName(`${humanizedTags} - ${md5}.${ext}`);
     }
 
-    return cleanDownloadName(filenameFromUrl(originalUrl)) || (post?.id ? `danbooru-${post.id}.${ext}` : undefined);
+    return cleanDownloadName(filenameFromUrl(originalUrl)) || (post?.id ? `${SITE_NAME}-${post.id}.${ext}` : undefined);
   }
 
   function rememberPost(post) {
@@ -370,7 +375,7 @@
     const postId = String(post.id);
     const originalUrl = stripDownloadParam(makeAbsoluteUrl(post.file_url));
     originalUrlByPostId.set(postId, originalUrl);
-    filenameByPostId.set(postId, defaultDanbooruDownloadName(post, originalUrl) || `danbooru-${postId}.${post.file_ext || "file"}`);
+    filenameByPostId.set(postId, defaultDanbooruDownloadName(post, originalUrl) || `${SITE_NAME}-${postId}.${post.file_ext || "file"}`);
   }
 
   function tagStringFromPost(post) {
@@ -768,7 +773,7 @@
       return nativeName;
     }
 
-    return cleanDownloadName((postId && filenameByPostId.get(postId)) || filenameFromUrl(originalUrl)) || `danbooru-${postId || "original"}`;
+    return cleanDownloadName((postId && filenameByPostId.get(postId)) || filenameFromUrl(originalUrl)) || `${SITE_NAME}-${postId || "original"}`;
   }
 
   function getListingActionContainer(preview, previewContainer) {
@@ -890,7 +895,7 @@
   function getPostPageDownloadName(originalUrl) {
     const urlName = cleanDownloadName(filenameFromUrl(originalUrl));
     const downloadName = nativeDownloadNameFromDocument();
-    return downloadName || urlName || "danbooru-original";
+    return downloadName || urlName || `${SITE_NAME}-original`;
   }
 
   async function fetchPostPageOriginalUrlFromApi() {
@@ -954,7 +959,7 @@
   }
 
   function pngDownloadName(filename) {
-    const name = filename || "danbooru-original";
+    const name = filename || `${SITE_NAME}-original`;
     return /\.jpe?g$/i.test(name) ? name.replace(/\.jpe?g$/i, ".png") : `${name}.png`;
   }
 
@@ -1015,7 +1020,7 @@
 
   function downloadOriginal(originalUrl, filename) {
     const downloadUrl = addDownloadParam(originalUrl);
-    const name = cleanDownloadName(filename || filenameFromUrl(originalUrl)) || "danbooru-original";
+    const name = cleanDownloadName(filename || filenameFromUrl(originalUrl)) || `${SITE_NAME}-original`;
 
     if (CONVERT_JPEG_TO_PNG && isJpegUrl(originalUrl)) {
       downloadJpegAsPng(originalUrl, name).catch(() => downloadNative(downloadUrl, name));
