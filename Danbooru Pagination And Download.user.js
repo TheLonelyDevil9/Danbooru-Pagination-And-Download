@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Danbooru Pagination And Download
 // @namespace    https://danbooru.donmai.us/
-// @version      2.7.0
+// @version      2.8.0
 // @updateURL    https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
 // @downloadURL  https://github.com/TheLonelyDevil9/Danbooru-Pagination-And-Download/raw/refs/heads/main/Danbooru%20Pagination%20And%20Download.user.js
-// @description  Load 10 Danbooru/AIBooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images. JPEG originals are saved as lossless PNG.
+// @description  Load 10 Danbooru/AIBooru post-list pages at once and add one-click original download buttons to listing thumbnails and post images. Raster originals are saved as lossless PNG.
 // @match        https://danbooru.donmai.us/*
 // @match        https://aibooru.online/*
 // @run-at       document-end
@@ -25,7 +25,7 @@
   "use strict";
 
   const PAGE_BATCH_SIZE = 10;
-  const CONVERT_JPEG_TO_PNG = true;
+  const CONVERT_IMAGES_TO_PNG = true;
   const SITE_NAME = location.hostname.replace(/^www\./, "").split(".")[0] || "booru";
   const PAGE_BUTTON_CLASS = "dcx-post-download";
   const PAGE_ACTIONS_CLASS = "dcx-post-actions";
@@ -954,13 +954,19 @@
     fallbackDownload(downloadUrl, name);
   }
 
-  function isJpegUrl(url) {
-    return /\.jpe?g(?:$|[?#])/i.test(url);
+  function isPngUrl(url) {
+    return /\.png(?:$|[?#])/i.test(url || "");
+  }
+
+  function isKnownNonImageUrl(url) {
+    return /\.(?:3g2|3gp|avi|m4v|mkv|mov|mp4|mpeg?|ogv|webm|wmv)(?:$|[?#])/i.test(url || "");
   }
 
   function pngDownloadName(filename) {
     const name = filename || `${SITE_NAME}-original`;
-    return /\.jpe?g$/i.test(name) ? name.replace(/\.jpe?g$/i, ".png") : `${name}.png`;
+    return /\.(?:avif|bmp|gif|jpe?g|png|webp|tiff?)$/i.test(name)
+      ? name.replace(/\.(?:avif|bmp|gif|jpe?g|png|webp|tiff?)$/i, ".png")
+      : `${name}.png`;
   }
 
   function fetchImageBlob(url) {
@@ -968,7 +974,8 @@
 
     if (!gmRequest) {
       return fetch(url, { mode: "cors", credentials: "omit" })
-        .then((response) => response.ok ? response.blob() : Promise.reject(new Error(`HTTP ${response.status}`)));
+        .then((response) => response.ok ? response.blob() : Promise.reject(new Error(`HTTP ${response.status}`)))
+        .then((blob) => blob.size > 0 ? blob : Promise.reject(new Error("The image response was empty")));
     }
 
     return new Promise((resolve, reject) => {
@@ -977,7 +984,7 @@
         url,
         responseType: "blob",
         onload: (response) => {
-          if (response.status >= 200 && response.status < 300 && response.response) {
+          if (response.status >= 200 && response.status < 300 && response.response?.size > 0) {
             resolve(response.response);
           } else {
             reject(new Error(`HTTP ${response.status}`));
@@ -989,21 +996,166 @@
     });
   }
 
-  async function convertBlobToPng(blob) {
-    const bitmap = await createImageBitmap(blob);
+  function decodedImageDimensions(source) {
+    const width = Number(source?.width || source?.naturalWidth || 0);
+    const height = Number(source?.height || source?.naturalHeight || 0);
+
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+      throw new Error("The browser decoded the image with invalid dimensions");
+    }
+
+    // These are conservative limits shared by the major browser canvas implementations.
+    // Rejecting here prevents a silent 0x0 or partially allocated canvas for huge originals.
+    if (width > 32767 || height > 32767 || width * height > 268000000) {
+      throw new Error(`The image is too large to encode in this browser (${width}x${height})`);
+    }
+
+    return { width, height };
+  }
+
+  async function decodeWithImageBitmap(blob) {
+    if (typeof createImageBitmap !== "function") {
+      throw new Error("createImageBitmap is unavailable");
+    }
+
+    let bitmap;
+    try {
+      try {
+        bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
+      } catch (_error) {
+        // Older browsers reject the options object even though they support the API.
+        bitmap = await createImageBitmap(blob);
+      }
+
+      decodedImageDimensions(bitmap);
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        close: () => bitmap.close(),
+      };
+    } catch (error) {
+      bitmap?.close();
+      throw error;
+    }
+  }
+
+  async function decodeWithImageElement(blob) {
+    const objectUrl = URL.createObjectURL(blob);
 
     try {
-      const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.getContext("2d").drawImage(bitmap, 0, 0);
-
-      return await new Promise((resolve, reject) => {
-        canvas.toBlob((pngBlob) => pngBlob ? resolve(pngBlob) : reject(new Error("PNG encoding failed")), "image/png");
+      const image = await new Promise((resolve, reject) => {
+        const element = new Image();
+        element.decoding = "async";
+        element.onload = () => resolve(element);
+        element.onerror = () => reject(new Error("The browser could not decode the image"));
+        element.src = objectUrl;
       });
-    } finally {
-      bitmap.close();
+
+      const { width, height } = decodedImageDimensions(image);
+      if (typeof image.decode === "function") {
+        await image.decode().catch(() => {});
+      }
+
+      return {
+        source: image,
+        width,
+        height,
+        close: () => URL.revokeObjectURL(objectUrl),
+      };
+    } catch (error) {
+      URL.revokeObjectURL(objectUrl);
+      throw error;
     }
+  }
+
+  function canvasContainsDecodedPixels(context, width, height) {
+    // A failed createImageBitmap decode can still report valid dimensions. Sampling the
+    // canvas catches the resulting transparent/empty bitmap before it is downloaded.
+    const lastX = width - 1;
+    const lastY = height - 1;
+    const points = [];
+
+    for (let y = 0; y < 5; y += 1) {
+      for (let x = 0; x < 5; x += 1) {
+        points.push([Math.floor(lastX * x / 4), Math.floor(lastY * y / 4)]);
+      }
+    }
+
+    return points.some(([x, y]) => Array.from(context.getImageData(x, y, 1, 1).data).some((channel) => channel !== 0));
+  }
+
+  function canvasToPng(canvas) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("PNG encoding timed out"));
+        }
+      }, 30000);
+
+      try {
+        canvas.toBlob((pngBlob) => {
+          window.clearTimeout(timeout);
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          if (!pngBlob || pngBlob.size < 8 || (pngBlob.type && pngBlob.type !== "image/png")) {
+            reject(new Error("PNG encoding failed"));
+            return;
+          }
+
+          resolve(pngBlob);
+        }, "image/png");
+      } catch (error) {
+        window.clearTimeout(timeout);
+        settled = true;
+        reject(error);
+      }
+    });
+  }
+
+  async function convertBlobToPng(blob, requireVisiblePixels = false) {
+    const decoders = [decodeWithImageBitmap, decodeWithImageElement];
+    let lastError;
+
+    for (const decode of decoders) {
+      let decoded;
+
+      try {
+        decoded = await decode(blob);
+        const canvas = document.createElement("canvas");
+        canvas.width = decoded.width;
+        canvas.height = decoded.height;
+
+        if (canvas.width !== decoded.width || canvas.height !== decoded.height) {
+          throw new Error(`The browser could not allocate a ${decoded.width}x${decoded.height} canvas`);
+        }
+
+        const context = canvas.getContext("2d", { alpha: true });
+
+        if (!context) {
+          throw new Error("A 2D canvas context is unavailable");
+        }
+
+        context.drawImage(decoded.source, 0, 0, decoded.width, decoded.height);
+
+        if (requireVisiblePixels && !canvasContainsDecodedPixels(context, decoded.width, decoded.height)) {
+          throw new Error("The decoded image rendered no pixels");
+        }
+
+        return await canvasToPng(canvas);
+      } catch (error) {
+        lastError = error;
+      } finally {
+        decoded?.close();
+      }
+    }
+
+    throw new Error(`All image decoders failed: ${lastError?.message || "unknown error"}`);
   }
 
   function downloadBlob(blob, filename) {
@@ -1012,18 +1164,40 @@
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
   }
 
-  async function downloadJpegAsPng(originalUrl, name) {
-    const jpegBlob = await fetchImageBlob(originalUrl);
-    const pngBlob = await convertBlobToPng(jpegBlob);
+  async function downloadImageAsPng(originalUrl, name) {
+    const imageBlob = await fetchImageBlob(originalUrl);
+
+    if (imageBlob.type && !/^image\//i.test(imageBlob.type)) {
+      throw new Error(`The download is not an image (${imageBlob.type})`);
+    }
+
+    // Preserve an existing PNG byte-for-byte. This avoids an unnecessary decode/re-encode
+    // and retains PNG metadata while still guaranteeing the requested output extension.
+    if (imageBlob.type.toLowerCase() === "image/png") {
+      downloadBlob(imageBlob, pngDownloadName(name));
+      return;
+    }
+
+    const requireVisiblePixels = /^image\/jpe?g$/i.test(imageBlob.type) || /\.jpe?g(?:$|[?#])/i.test(originalUrl);
+    const pngBlob = await convertBlobToPng(imageBlob, requireVisiblePixels);
     downloadBlob(pngBlob, pngDownloadName(name));
+  }
+
+  function reportPngConversionFailure(error) {
+    console.error("Danbooru Pagination And Download: PNG conversion failed; no lossy fallback was downloaded.", error);
   }
 
   function downloadOriginal(originalUrl, filename) {
     const downloadUrl = addDownloadParam(originalUrl);
     const name = cleanDownloadName(filename || filenameFromUrl(originalUrl)) || `${SITE_NAME}-original`;
 
-    if (CONVERT_JPEG_TO_PNG && isJpegUrl(originalUrl)) {
-      downloadJpegAsPng(originalUrl, name).catch(() => downloadNative(downloadUrl, name));
+    if (CONVERT_IMAGES_TO_PNG && !isPngUrl(originalUrl) && !isKnownNonImageUrl(originalUrl)) {
+      downloadImageAsPng(originalUrl, name).catch((error) => {
+        reportPngConversionFailure(error);
+        // Keep the download usable if a browser cannot decode a particular image format.
+        // The important invariant is that a failed conversion must never save an empty PNG.
+        downloadNative(downloadUrl, name);
+      });
       return;
     }
 
